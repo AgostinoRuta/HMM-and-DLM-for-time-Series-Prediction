@@ -1,0 +1,634 @@
+---
+title: "Final_Project_TSA"
+author: "Georgia Koutsoura - Agostino Ruta - Nicolas Sourisseau"
+date: "Group 9"
+output: pdf_document
+---
+\section*{}
+\textbf{Research Question:} How to anticipate an increase in the level of $PM_{25}$? 
+To answer this question, we first give employ a simple model, namely a Hidden Markov Model to have a first idea on the data. Then, we apply more complex structures, including the spatial dependence or other factors such as the wind and the temperatures for example to have a more precise estimate.
+
+```{r setup, include= F}
+library(depmixS4)
+library(ggplot2)
+library(rnaturalearthdata)
+library(rgeos)
+library(ggrepel)
+library(knitr)
+library(tidyverse)
+library(tseries)
+library(magrittr)
+library(psych)
+library(gtsummary)
+library(zoo)
+library(lubridate)
+library(MLmetrics)
+library(dlm)
+library(xtable)
+options(xtable.timestamp = "")
+options(xtable.comment = FALSE)
+options(xtable.floating = TRUE)
+```
+
+For the first part of the analysis of the data, we decided to focus on the station 47. Our data set contains information on the hourly level of $PM_{25}$, wind, and temperature. In most of our analysis, we are going to take into account only the former to try to predict it since it is our variable of interest. However, it is reasonable, at this stage, to believe that the level of $PM_{25}$ is affected by the wind and the temperature since it is impacted by wildfires.
+\newline
+
+```{r, echo=F}
+ts_epa_2020_west_sept_fill <- read_csv("ts_epa_2020_west_sept_fill.csv", col_types = cols(temp = col_double(), wind = col_double()))
+
+series47 <- ts_epa_2020_west_sept_fill %>% dplyr::filter(station_id == 47)
+
+pm<-ts(series47$pm25)
+temp<-ts(series47$temp)
+wind<-ts(series47$wind)
+```
+
+\subsection*{ Description of the Data:}
+
+Let us first plot the time series corresponding to the level of $PM_{25}$ measured at the station 47 to get a first idea about the time series and the way we can try to modelize it.
+\newline 
+```{r, echo=F, out.width = '45%', fig.align = "center"}
+  ggplot() + 
+  ggtitle("Fig. 1: PM2.5 - Station 47") +
+  geom_line(data=series47, aes(x=datetime, y=pm25)) + 
+  geom_hline(yintercept=mean(pm), color="Blue") +
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(x=NULL, y=NULL) +
+  theme(plot.title=element_text(size=15))
+```
+```{r, echo=F, message= F, warning= F, comment=' ', out.width = '70%', cache.comments=TRUE, results='asis'}
+Stat1=round(min(series47$pm25), digits=2)
+Stat2=round(median(series47$pm25), digits=2)
+Stat3=round(max(series47$pm25), digits=2)
+Stat4=round(mean(series47$pm25), digits=2)
+Stat5=round(sd(series47$pm25), digits=2)
+
+Stats <- matrix(c(Stat1, Stat2, Stat3, Stat4, Stat5), ncol=5, byrow=TRUE)
+colnames(Stats) <- c('Min ','Med ','Max ', 'Mean ', 'SD ')
+rownames(Stats) <- c(' ')
+Stats.table<-xtable(Stats, caption="Summary Statistics")
+align(Stats.table)<-"|lr|r|r|r|r|"
+Stats.table
+```
+
+As we can see from Figure 1, the time series shows no clear trend nor seasonal component. However, it is not stationary (\textit{the average between June and August is clearly below the average between mid-August and mid-September}) and since there is no trend or seasonal component, we can not use a simple transformation to make it stationary. 
+Nevertheless, if we look closely to Figure 1, we can see that the time series admits change points, hence we may want to use a Hidden Markov Model to modelize it. 
+
+\subsection*{ Hidden Markov Model:}
+
+
+A Hidden Markov Model is a discrete time stochastic process $\big((Y_t, S_t)\big)_t$, where one assumes that the observable time series $(Y_t)_{t\ge1}$ depends on a latent process $(S_t)_{t\ge0}$ (\textit{state process}). Therefore, in our case, the stochastic time process is $(PM2.5_t)_{t\ge1}$.
+\newline
+Our assumptions concerning this model are that:
+\newline
+\newline
+•\phantom{aaaa}$(S_t)_{t\ge0}$ is an homogenous Markov chain, with state space $\{1, 2, 3\}$, initial distribution $\pi$, and \phantom{aaaaaa}transition matrix $P=\big(p_{ij}\big)_{i,j=1}^3$.
+\newline
+\newline
+•\phantom{aaaa}Conditionally on $(S_t)_{t\ge 0}$, the $PM2.5_t$'s are independent and $\forall E$, it is that:
+\begin{center}
+$\mathbb P\big\{PM2.5_t\in E|PM2.5_{1:t-1}; s_{0:t}\big\}=\mathbb P\big\{PM2.5_t\in E|s_t\big\}$.
+\end{center}
+
+\medskip
+Note that, here, we define a model with three hidden states. However, concerning the number of states for our HMM estimation, from Figure 1, we can see either two or three states. On one hand, we prefer to use a model that is more accurate, this argument would be in favor of the three-state hypothesis. But on the other hand, if we add to many states, then our model is too tailored and will not be useful anymore, this argument would be in favor of the two-state hypothesis. 
+
+To have a better idea, let us first try a model with three states. Note that the estimations were made by maximum likelihood. In that case, the obtained transition matrix and response parameters are respectively given by Table 2 and 3:
+
+```{r, include=F}
+Mod3S<-depmix(pm~1, data=data.frame(pm), nstates = 3)
+FitMod3S<-fit(Mod3S)
+Mat3=FitMod3S@trDens
+
+Mat3_11=min(Mat3[1], Mat3[5], Mat3[9])
+Mat3_22=median(c(Mat3[1], Mat3[5], Mat3[9]))
+Mat3_33=max(Mat3[1], Mat3[5], Mat3[9])
+
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[5]){Mat3_12=Mat3[2]} else 
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[9]){Mat3_12=Mat3[3]} else 
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[1]){Mat3_12=Mat3[4]} else
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[9]){Mat3_12=Mat3[6]} else 
+if(Mat3_11==Mat3[9] & Mat3_22==Mat3[1]){Mat3_12=Mat3[7]} else{Mat3_12=Mat3[8]}
+
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[5]){Mat3_13=Mat3[3]} else 
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[9]){Mat3_13=Mat3[2]} else 
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[1]){Mat3_13=Mat3[6]} else
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[9]){Mat3_13=Mat3[4]} else 
+if(Mat3_11==Mat3[9] & Mat3_22==Mat3[1]){Mat3_13=Mat3[8]} else{Mat3_13=Mat3[7]}
+
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[5]){Mat3_21=Mat3[4]} else 
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[9]){Mat3_21=Mat3[7]} else 
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[1]){Mat3_21=Mat3[2]} else
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[9]){Mat3_21=Mat3[8]} else 
+if(Mat3_11==Mat3[9] & Mat3_22==Mat3[1]){Mat3_21=Mat3[3]} else{Mat3_21=Mat3[6]}
+
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[5]){Mat3_23=Mat3[6]} else 
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[9]){Mat3_23=Mat3[8]} else 
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[1]){Mat3_23=Mat3[3]} else
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[9]){Mat3_23=Mat3[7]} else 
+if(Mat3_11==Mat3[9] & Mat3_22==Mat3[1]){Mat3_23=Mat3[2]} else{Mat3_23=Mat3[4]}
+
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[5]){Mat3_31=Mat3[7]} else 
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[9]){Mat3_31=Mat3[4]} else 
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[1]){Mat3_31=Mat3[8]} else
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[9]){Mat3_31=Mat3[2]} else 
+if(Mat3_11==Mat3[9] & Mat3_22==Mat3[1]){Mat3_31=Mat3[6]} else{Mat3_31=Mat3[3]}
+
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[5]){Mat3_32=Mat3[8]} else 
+if(Mat3_11==Mat3[1] & Mat3_22==Mat3[9]){Mat3_32=Mat3[6]} else 
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[1]){Mat3_32=Mat3[7]} else
+if(Mat3_11==Mat3[5] & Mat3_22==Mat3[9]){Mat3_32=Mat3[3]} else 
+if(Mat3_11==Mat3[9] & Mat3_22==Mat3[1]){Mat3_32=Mat3[4]} else{Mat3_32=Mat3[2]}
+
+TrMatrix3S=matrix(c(Mat3_11, Mat3_12, Mat3_13, Mat3_21, Mat3_22, Mat3_23, Mat3_31, Mat3_32, Mat3_33), ncol=3, nrow=3, byrow=TRUE)
+rownames(TrMatrix3S)=c("state 1","state 2", "state 3")
+colnames(TrMatrix3S)=c("state 1","state 2", "state 3")
+TrMatrix3S<-round(TrMatrix3S, digits=3)
+
+Resp3=standardError(FitMod3S)
+RespVal3=round(c(Resp3$par[13], Resp3$par[15], Resp3$par[17], Resp3$par[14], Resp3$par[16], Resp3$par[18]),4)
+RespErr3=round(c(Resp3$se[13], Resp3$se[15], Resp3$se[17], Resp3$se[14], Resp3$se[16], Resp3$se[18]),4)
+RespMatrix3= matrix(c(RespVal3[1:3], RespErr3[1:3],RespVal3[4:6], RespErr3[4:6]), ncol=4, nrow=3, byrow=FALSE)
+RespMatrix3S=matrix(, ncol=4, nrow=3)
+if(Mat3_11==Mat3[1]){RespMatrix3S[1,]=RespMatrix3[1,]} else if(Mat3_11==Mat3[5]){RespMatrix3S[1,]=RespMatrix3[2,]} else{RespMatrix3S[1,]=RespMatrix3[3,]}
+if(Mat3_22==Mat3[1]){RespMatrix3S[2,]=RespMatrix3[1,]} else if(Mat3_22==Mat3[5]){RespMatrix3S[2,]=RespMatrix3[2,]} else{RespMatrix3S[2,]=RespMatrix3[3,]}
+if(Mat3_33==Mat3[1]){RespMatrix3S[3,]=RespMatrix3[1,]} else if(Mat3_33==Mat3[5]){RespMatrix3S[3,]=RespMatrix3[2,]} else{RespMatrix3S[3,]=RespMatrix3[3,]}
+colnames(RespMatrix3S)=c("Mean", "SE", "SD","SE")
+rownames(RespMatrix3S)=c("state 1","state 2","state 3")
+```
+```{r, echo=F, message= F, warning= F, comment=' ', cache.comments=T, results='asis'}
+TrMatrix3S.table<-xtable(TrMatrix3S, digits=3, caption="Transition Matrix - 3 States")
+align(TrMatrix3S.table)<-"|l|rrr|"
+TrMatrix3S.table
+RespMatrix3S.table<-xtable(RespMatrix3S, digits=3, caption="Response Parameters - 3 States")
+align(RespMatrix3S.table)<-"|l|ll|rr|"
+RespMatrix3S.table
+```
+```{r, echo=F, message= F, warning= F, out.width = '60%', fig.align = "center"}
+PostFitMod3S<-posterior(FitMod3S)
+
+i = PostFitMod3S[1,1]
+ii = if(i==1){i+1} else if(i==2){i-1} else{i-2}
+iii = if(i==1){i+2} else if(i==2){i+1} else{i-1}
+
+estMean1_3S=FitMod3S@response[[i]][[1]]@parameters$coefficients
+estMean2_3S=FitMod3S@response[[ii]][[1]]@parameters$coefficients
+estMean3_3S=FitMod3S@response[[iii]][[1]]@parameters$coefficients
+
+estSd1_3S=FitMod3S@response[[i]][[1]]@parameters$sd
+estSd2_3S=FitMod3S@response[[ii]][[1]]@parameters$sd
+estSd3_3S=FitMod3S@response[[iii]][[1]]@parameters$sd
+
+estMeans_3S=rep(estMean1_3S, length(pm))
+estMeans_3S[PostFitMod3S[,1]==ii]=estMean2_3S
+estMeans_3S[PostFitMod3S[,1]==iii]=estMean3_3S
+
+estSd_3S=rep(estSd1_3S, length(pm))
+estSd_3S[PostFitMod3S[,1]==ii]=estSd2_3S
+estSd_3S[PostFitMod3S[,1]==iii]=estSd3_3S
+
+graph3S<-ggplot() + 
+  ggtitle("Fig. 2: Gaussian HMM for PM2.5 - 3 States") +
+  geom_ribbon(data=series47, aes(x=datetime, ymin=estMeans_3S-1.645*estSd_3S, ymax=estMeans_3S+1.645*estSd_3S), fill='lightblue') +
+  geom_line(data=series47, aes(x=datetime, y=pm25)) + 
+  geom_point(data=series47, aes(x=datetime, y=estMeans_3S), colour='blue', size=.3) +
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(x=NULL, y=NULL) +
+  theme(plot.title=element_text(size=15))
+
+graph3S 
+```
+
+As we can see, two of the states have a very close estimated average, therefore, according to the parsimony principle, we should favor a model with only two states. Nevertheless, note that the $95\%$ intervals of the state means do not intersect, hence, the model can be used. Figure 2 clearly shows that the distribution (\textit{in light blue, the $90\%$ prediction interval of the distribution}) in the high-level state is way more dispersed than in the middle- and low-level states. Moreover, the distributions of the middle- and low-level states clearly overlap, therefore we have reasons to believe that introducing a third state may be redundant. Using now the same model as before but with only two states, the obtained transitioned matrix and response parameters are respectively given by Table 4 and 5:
+
+```{r, include=F}
+Mod2S<-depmix(pm~1, data=data.frame(pm), nstates = 2)
+FitMod2S<-fit(Mod2S)
+
+Mat2=FitMod2S@trDens
+Mat2_11=min(Mat2[1], Mat2[4])
+if(Mat2_11==Mat2[1]){Mat2_12=Mat2[2]} else{Mat2_12=Mat2[3]}
+if(Mat2_12==Mat2[2]){Mat2_21=Mat2[3]} else{Mat2_21=Mat2[2]}
+Mat2_22=max(Mat2[1], Mat2[4])
+
+TrMatrix2S=matrix(c(Mat2_11, Mat2_12, Mat2_21, Mat2_22), ncol=2, nrow=2, byrow=TRUE)
+rownames(TrMatrix2S)=c("state 1","state 2")
+colnames(TrMatrix2S)=c("state 1","state 2")
+TrMatrix2S<-round(TrMatrix2S, digits=3)
+
+Resp2=standardError(FitMod2S)
+RespVal2=round(c(Resp2$par[7], Resp2$par[9], Resp2$par[8], Resp2$par[10]),4)
+RespErr2=round(c(Resp2$se[7], Resp2$se[9], Resp2$se[8], Resp2$se[10]),4)
+RespMatrix2= matrix(c(RespVal2[1:2], RespErr2[1:2],RespVal2[3:4], RespErr2[3:4]), ncol=4, nrow=2, byrow=FALSE)
+RespMatrix2S=matrix(, ncol=4, nrow=2)
+if(Mat2_11==Mat2[1]){RespMatrix2S[1,]=RespMatrix2[1,]} else{RespMatrix2S[1,]=RespMatrix2[2,]}
+if(Mat2_11==Mat2[1]){RespMatrix2S[2,]=RespMatrix2[2,]} else{RespMatrix2S[2,]=RespMatrix2[1,]}
+colnames(RespMatrix2S)=c("Mean", "SE", "SD","SE")
+rownames(RespMatrix2S)=c("state 1","state 2")
+```
+```{r, echo=F, message= F, warning= F, comment=' ', cache.comments=TRUE, results='asis'}
+TrMatrix2S.table<-xtable(TrMatrix2S, digits=3, caption="Transition Matrix - 2 States")
+align(TrMatrix2S.table)<-"|l|rr|"
+TrMatrix2S.table
+RespMatrix2S.table<-xtable(RespMatrix2S, digits=3, caption="Response Parameters - 2 States")
+align(RespMatrix2S.table)<-"|l|ll|rr|"
+RespMatrix2S.table
+```
+```{r, echo=F, message= F, warning= F, out.width = '70%', fig.align = "center"}
+PostFitMod2S<-posterior(FitMod2S)
+
+i = PostFitMod2S[1,1]
+ii = if(i==1){i+1} else if(i==2){i-1} 
+
+
+estMean1_2S=FitMod2S@response[[i]][[1]]@parameters$coefficients
+estMean2_2S=FitMod2S@response[[ii]][[1]]@parameters$coefficients
+estMeans_2S=rep(estMean1_2S, length(pm))
+estMeans_2S[PostFitMod2S[,1]==ii]=estMean2_2S
+
+estSd1_2S=FitMod2S@response[[i]][[1]]@parameters$sd
+estSd2_2S=FitMod2S@response[[ii]][[1]]@parameters$sd
+estSd_2S=rep(estSd1_2S, length(pm))
+estSd_2S[PostFitMod2S[,1]==ii]=estSd2_2S
+
+graph2S<-ggplot() + 
+  ggtitle("Fig. 3: Gaussian HMM for PM2.5 - 2 States") +
+  geom_ribbon(data=series47, aes(x=datetime, ymin=max(estMeans_2S-1.645*estSd_2S, 0), ymax=estMeans_2S+1.645*estSd_2S), fill='lightblue') +
+  geom_line(data=series47, aes(x=datetime, y=pm25)) + 
+  geom_point(data=series47, aes(x=datetime, y=estMeans_2S), colour='blue', size=.3) +
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(x=NULL, y=NULL) +
+  theme(plot.title=element_text(size=15))
+
+graph2S 
+```
+
+In this Figure 3, we observe that the average amount of $PM_{25}$ in state 1 is way above the threshold while in state 2, it is below. Therefore, we can consider that the two-state modelization is useful because it allows us to make predictions about the fact that the level will be dangerous or not, and, this dichotomy is a very appropriate simplification for our analysis. Note that in both cases (\text{three or two states}), the estimated averages of the states are all statistically different from each other (\textit{their $95\%$ confidence interval do not cross}). Indeed, for the high state, the $95\%$ confidence interval of the mean is $\big[60.493, 66.063\big]$. Concerning the low state, we have $\big[17.345, 17.721\big]$. Therefore, when we are in the high state, the average level of $PM_{25}$ is really worrying (\textit{clearly above the threshold}) while in the low state the average is clearly below the average.
+\newline
+However, in Figure 3, we can also see that the $90\%$ prediction interval for the high-level state distribution is very large, including values under the threshold.
+\newline
+Nevertheless, considering the points mentioned before and the parsimony principle, we will keep the two-state model for our analysis, since it may be the most useful one (\textit{for this specification}).
+
+
+\subsection*{ Analysis:}
+
+To identify and estimate the different levels, the first idea, is to use a Hidden Markov Model. We have have estimated 2 of them, one with 2 states and one with 3. 
+\newline
+Using this method, we obtained the transition matrix (\textit{Table 4}) which gives us the probability of going from one state to the other. This means that we have the probability of remaining above the danger threshold ($p_{11}=97.9\%$), in which case some immediate action should be taken and the probability of remaining below the threshold ($p_{22}=99.2\%$), in which case no action is required. This is consistent with the fact that in Figure 3, several observations accumulate around the same level before switching to another level, hence we generally tend to stay in the same state in the next few hours. We also have the probability of going from the dangerous level to the not dangerous one ($p_{12}=2.1\%$) and conversely ($p_{21}=0.8\%$).
+\newline
+In the three-state model, we have the opportunity to set an intermediate state in which some less constraining action should be taken.  
+\newline
+Using the two-state model, we can see that the probability that, given that we have a high level of pollution at a certain time, the state will remain the same in the next hour is $97.9\%$. Therefore, the probability of a significant decrease in the next hour is $2.1\%$. Concerning a significant decrease in the next few hours, by taking the $n^{th}$-order of the transition matrix, the probability $p_{12}$ will provide the probability of being in the low level $n$ hours after having been in the high level. However, note that this probability also takes into account the possibility of several state transitions in those $n$ hours.
+
+\subsection*{ Spatial Dependence:}
+
+The first modelization that we have done seems to be appropriate for the data, however, as explained before, we could include additional factors to have a more accurate forecast. We could consider other variables such as the wind and the temperature, or  account for the spatial dependence of the different stations. For now, we are going to focus on the second approach by fitting a random walk plus noise (\textit{dynamic linear model}).
+\newline
+
+To proceed, we are first going to downsize the data, grouping it by non-overlapping day and night average (\textit{12 hour averages}) for each date. Note that we also need to include other stations to measure the spatial dependence. Therefore, we will incorporate, from now on, the data from stations 55 and 92 in our analysis.
+\newline
+Note that we are also taking the logarithm of the variables to reduce the variance of the time series. 
+\newline
+```{r, echo=F, message= F, warning= F, out.width = '35%'}
+series55 <- ts_epa_2020_west_sept_fill %>% dplyr::filter(station_id == 55)
+series92 <- ts_epa_2020_west_sept_fill %>% dplyr::filter(station_id == 92)
+
+original_47 <- data.frame(date = series47$datetime) %>% 
+  mutate(l_pm25 = log(series47$pm25))
+
+downsized_47 <- original_47 %>% 
+  mutate(day = (hour(date) > 7) & (hour(date) < 19),
+    shift_date = date - 8*3600) %>%
+  group_by(as_date(shift_date), day) %>%
+  summarise(date = date[1], 
+            l_pm25 = mean(l_pm25))
+
+original_55 <- data.frame(date = series55$datetime) %>% 
+  mutate(l_pm25 = log(series55$pm25))
+
+downsized_55 <- original_55 %>% 
+  mutate(day = (hour(date) > 7) & (hour(date) < 19),
+    shift_date = date - 8*3600) %>%
+  group_by(as_date(shift_date), day) %>%
+  summarise(date = date[1], 
+            l_pm25 = mean(l_pm25))
+
+original_92 <- data.frame(date = series92$datetime) %>% 
+  mutate(l_pm25 = log(series92$pm25))
+
+downsized_92 <- original_92 %>% 
+  mutate(day = (hour(date) > 7) & (hour(date) < 19),
+    shift_date = date - 8*3600) %>%
+  group_by(as_date(shift_date), day) %>%
+  summarise(date = date[1], 
+            l_pm25 = mean(l_pm25))
+
+Cor47_55<-cor(as.ts(downsized_47$l_pm25), as.ts(downsized_55$l_pm25), use="everything")
+Cor47_92<-cor(as.ts(downsized_47$l_pm25), as.ts(downsized_92$l_pm25), use="everything")
+Cor55_92<-cor(as.ts(downsized_55$l_pm25), as.ts(downsized_92$l_pm25), use="everything")
+```
+```{r, echo=F, message= F, warning= F, out.width = '60%', fig.align = "center"}
+colors<-c("Downsized Data - Station 47" = "blue", "Downsized Data - Station 55" = "red", "Downsized Data - Station 92" = "orange", "Log of the Critical Threshold"="black")
+ggplot(downsized_47, aes(x=date, y=l_pm25, color="Downsized Data - Station 47")) +
+  geom_line(col="blue") + 
+  geom_line(data=downsized_55, aes(y=l_pm25, color="Downsized Data - Station 55")) +
+  geom_line(data=downsized_92, aes(y=l_pm25, color="Downsized Data - Station 92")) +
+  geom_line(aes(y=log(25), color="Log of the Critical Threshold")) +
+  theme_minimal() +
+  labs(x=NULL, y=NULL, color="Legend") +
+  scale_color_manual(values = colors) +
+  ggtitle("Fig. 4: Downsized log-data") +
+  theme(
+    legend.position=c(.05, .95), 
+    legend.justification = c("left", "top"), 
+    legend.box.just = "left",
+    legend.margin = margin(6, 6, 6, 6), 
+    plot.title=element_text(size=15)
+  )
+```
+
+Figure 4 depicts the three downsized time series and the logarithm of the critical threshold. We notice a high correlation between stations 47 and 55 (0.952), which are close to each other. On the other hand, the correlation between each of these and station 92 is lower (\textit{0.392 and 0.472 respectively}) and this station is in a further location. Indeed, it makes sense that the levels of $PM_{25}$ of close locations are correlated. Therefore, this would tend to confirm the fact that including the spatial dimension in our model would be relevant. 
+
+To modelize this dependence, we are using a multivariate dynamic linear model, in which the three time series are dependent only through the covariance of state-errors (\textit{and not through the fact that each state can directly affect the other stations}).
+Therefore, both $F$ and $G$ are diagonal matrices. Since we want to modelize random walks plus noise, we have:
+
+\begin{center}
+$F=G=\begin{pmatrix}1&0&0\\0&1&0\\0&0&1\end{pmatrix}$.
+\end{center}
+
+Concerning the rest of the parameters of our model, after trying the optimization the first time, we observed that the variances of $v_{j,t}$ were very close (\textit{or equal}), therefore, we can add to our model, the assumption that:
+
+\begin{center}
+$\sigma_{v_{i}}^2\equiv \sigma_v^2,  \forall i\in \{47, 55, 92\}$. 
+\end{center}
+
+Therefore,  we have:
+
+\begin{center}
+$V=\begin{pmatrix}\sigma_v^2&0&0\\0&\sigma_v^2&0\\0&0&\sigma_v^2\end{pmatrix}$
+\end{center}
+
+Contrary to basic models, our $W$ matrix is not diagonal to allow for the spatial dependence (\textit{D represents the distance between the stations}). It is given by:
+
+\begin{center}
+$W=\begin{pmatrix}\sigma ^2&\sigma ^2e^{-\phi D(47,55)}&\sigma ^2e^{-\phi D(47,92)}\\\sigma ^2e^{-\phi D(47,55)}&\sigma^2&\sigma ^2e^{-\phi D(55,92)}\\\sigma ^2e^{-\phi D(47,92)}&\sigma ^2e^{-\phi D(55,92)}&\sigma ^2\end{pmatrix}$.
+\end{center}
+
+Therefore, the model that we want to estimate is given by:
+\begin{center}
+$$
+\left\{
+\begin{aligned}
+Y_t=F\theta _t+v_t\\
+\theta _t=G\theta _{t-1}+w_t
+\end{aligned}
+\right.
+\Rightarrow 
+\left\{
+\begin{aligned}
+\begin{pmatrix}Y_{47, t}\\Y_{55, t}\\Y_{92, t}\end{pmatrix}= \begin{pmatrix}1&0&0\\0&1&0\\0&0&1\end{pmatrix}\phantom{,}\begin{pmatrix}\theta _{47,t}\\\theta_{55, t}\\\theta_{92, t}\end{pmatrix}\phantom{,}+\begin{pmatrix}v_{47, t}\\v_{55, t}\\v_{92, t}\end{pmatrix} \phantom{,} \\
+\begin{pmatrix}\theta _{47,t}\\\theta_{55, t}\\\theta_{92, t}\end{pmatrix}= \begin{pmatrix}1&0&0\\0&1&0\\0&0&1\end{pmatrix}\begin{pmatrix}\theta _{47,t-1}\\\theta_{55, t-1}\\\theta_{92, t-1}\end{pmatrix}+\begin{pmatrix}w_{47, t}\\w_{55, t}\\w_{92, t}\end{pmatrix} \\
+\end{aligned}
+\right.
+\Rightarrow 
+\left\{
+\begin{aligned}
+\begin{pmatrix}Y_{47, t}\\Y_{55, t}\\Y_{92, t}\end{pmatrix}= \phantom{,}\begin{pmatrix}\theta _{47,t}\\\theta_{55, t}\\\theta_{92, t}\end{pmatrix}\phantom{,}+\begin{pmatrix}v_{47, t}\\v_{55, t}\\v_{92, t}\end{pmatrix} \phantom{,} \\
+\begin{pmatrix}\theta _{47,t}\\\theta_{55, t}\\\theta_{92, t}\end{pmatrix}= \begin{pmatrix}\theta _{47,t-1}\\\theta_{55, t-1}\\\theta_{92, t-1}\end{pmatrix}+\begin{pmatrix}w_{47, t}\\w_{55, t}\\w_{92, t}\end{pmatrix}\\
+\end{aligned}
+\right.
+$$
+\end{center}
+
+Where:
+
+\begin{center}
+$v_t\overset{indep}\sim \mathcal N_3 \left(\bold 0, \sigma _v^2I\right)$
+
+\medskip
+$w_t\overset{indep}\sim \mathcal N_3\left(\bold 0, \begin{pmatrix}\sigma ^2&\sigma ^2e^{-\phi D(47,55)}&\sigma ^2e^{-\phi D(47,92)}\\\sigma ^2e^{-\phi D(47,55)}&\sigma^2&\sigma ^2e^{-\phi D(55,92)}\\\sigma ^2e^{-\phi D(47,92)}&\sigma ^2e^{-\phi D(55,92)}&\sigma ^2\end{pmatrix}\right)$ 
+\end{center}
+
+```{r, echo=F, message= F, warning= F, comment=' ', out.width = '70%', cache.comments=TRUE, results='asis'}
+Y_pm=ts.union(ts(downsized_47$l_pm25), ts(downsized_55$l_pm25), ts(downsized_92$l_pm25))
+
+coords <- matrix(c(series47$Longitude[1], series55$Longitude[1], series92$Longitude[1],series47$Latitude[1], series55$Latitude[1], series92$Latitude[1]), ncol=2)
+colnames(coords) <- c("Longitude", "Latitude")
+
+DD <- as.matrix(dist(coords))
+
+build_spatial <- function(par){
+  VV <- diag(3) * par[1]
+  WW <- par[2] * exp(- par[3] * DD)
+  FF <- diag(3)
+  GG <- diag(3)
+  my_mod <- dlm(FF=FF,
+                GG=GG,
+                V = VV,
+                W = WW,
+                m0 = Y_pm[1,], 
+                C0 = diag(3) * 1e2)
+  return(my_mod)
+}
+
+MLE<-dlmMLE(Y_pm,parm=rep(5, 3), build_spatial, lower=c(0.00001, 0.00001, 0.00001), hessian=T)
+ASE<-sqrt(diag(solve(MLE$hessian)))
+
+MLE_est<-matrix(c(MLE$par[1:3], ASE[1:3]), nrow=2, byrow=T)
+colnames(MLE_est)=c("Sigma_v2", "Sigma2", "Phi")
+rownames(MLE_est)=c("MLE","SE")
+```
+When estimating the parameters of the model, we get the following maximum likelihood estimates (\textit{note that the three parameters are imposed to be positive}):
+```{r, echo=F, message= F, warning= F, comment=' ', cache.comments=TRUE, results='asis'}
+MLE_est.table<-xtable(MLE_est, digits=3, caption="MLE")
+align(MLE_est.table)<-"|l|r|r|r|"
+MLE_est.table
+```
+Hence, taking $95\%$ confidence interval, we have $\sigma _v^2\in \big[0.011, 0.019\big],\  \sigma ^2\in \big[0.019, 0.0.031\big],$ and $\phi \in \big[0.105,0.095\big]$. Now, using these estimates, we can use Kalman Filter to compute the one-step ahead forecast for the states and for the observations, as shown by Table 6.
+```{r, echo=F, message= F, warning= F, out.width = '35%'}
+Model<-build_spatial(MLE$par)
+Filtered<-dlmFilter(Y_pm, Model)
+
+a_47<-Filtered$a[,1]
+a_55<-Filtered$a[,2]
+a_92<-Filtered$a[,3]
+
+listR <- dlmSvd2var(Filtered$U.R, Filtered$D.R)
+sqrtR <- sqrt(unlist(listR)) 
+
+sqrtR_47<-sqrtR[1]
+for(i in 1:244){
+  sqrtR_47<-c(sqrtR_47, sqrtR[9*i+1])
+}
+
+sqrtR_55<-sqrtR[5]
+for(i in 1:244){
+  sqrtR_55<-c(sqrtR_55, sqrtR[9*i+5])
+}
+
+sqrtR_92<-sqrtR[9]
+for(i in 1:244){
+  sqrtR_92<-c(sqrtR_92, sqrtR[9*i+9])
+}
+```
+```{r, echo=F, message= F, warning= F, out.width = '70%', fig.align = "center"}
+colors<-c("State Forecast - Station 47" = "blue", "State Forecast - Station 55" = "red", "State Forecast - Station 92" = "orange")
+ggplot() + 
+  ggtitle("Fig. 5: 1-step ahead state forecasts") +
+  geom_line(aes(x=downsized_47$date[-1], y=a_47[-1], color="State Forecast - Station 47")) + 
+  geom_line(aes(x=downsized_55$date[-1], y=a_55[-1], color="State Forecast - Station 55")) + 
+  geom_line(aes(x=downsized_92$date[-1], y=a_92[-1], color="State Forecast - Station 92")) + 
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(x=NULL, y=NULL, color="Legend") +
+  scale_color_manual(values = colors) +
+  theme(
+    legend.position=c(.05, .95), 
+    legend.justification = c("left", "top"), 
+    legend.box.just = "left",
+    legend.margin = margin(6, 6, 6, 6),
+    plot.title=element_text(size=15)
+  )
+```
+As we can see in figure 5, the one-step ahead state forecast of stations 47 and 55 are very similar, which confirm our expectations. On the other hand, in station 92, the level of $PM_{2.5}$ tends to vary less, starting at a higher level but never reaching a level as high as the level reached by the other stations. 
+\newline
+From the previous point, we can see that the level of the $PM_{2.5}$ in the station 92 has a lower variance than the one of the other stations. However, the formula that we are using considers the variances to be equal, hence, it might be too restrictive. 
+```{r, echo=F, message= F, warning= F, out.width = '35%'}
+f_47<-Filtered$f[,1]
+f_55<-Filtered$f[,2]
+f_92<-Filtered$f[,3]
+
+sqrtQ_47<-sqrt(sqrtR_47^2+Filtered$mod$V[1,1]*rep(1, 245))
+sqrtQ_55<-sqrt(sqrtR_55^2+Filtered$mod$V[2,2]*rep(1, 245))
+sqrtQ_92<-sqrt(sqrtR_92^2+Filtered$mod$V[3,3]*rep(1, 245))
+
+ggplot() + 
+  ggtitle("Fig. 6: 1-step ahead obs. forecasts - Station 47") +
+  geom_ribbon(aes(x=downsized_47$date[-1], ymin=f_47[-1]-1.96*sqrtQ_47[-1], ymax=f_47[-1]+1.96*sqrtQ_47[-1]), fill='lightblue') +
+  geom_line(aes(x=downsized_47$date[-1], y=f_47[-1]), col='blue') + 
+  geom_line(aes(x=downsized_47$date[-1], y=downsized_47$l_pm25[-1])) +
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  ylim(1.8, 5.2) +
+  labs(x=NULL, y=NULL)  +
+  theme(plot.title=element_text(size=20))
+
+ggplot() + 
+  ggtitle("Fig. 7: 1-step ahead obs. forecasts - Station 55") +
+  geom_ribbon(aes(x=downsized_55$date[-1], ymin=f_55[-1]-1.96*sqrtQ_55[-1], ymax=f_55[-1]+1.96*sqrtQ_55[-1]), fill='pink') +
+  geom_line(aes(x=downsized_55$date[-1], y=f_55[-1]), col='red') + 
+  geom_line(aes(x=downsized_47$date[-1], y=downsized_55$l_pm25[-1])) +
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  ylim(1.8, 5.2) +
+  labs(x=NULL, y=NULL)  +
+  theme(plot.title=element_text(size=20))
+
+ggplot() + 
+  ggtitle("Fig. 8: 1-step ahead obs. forecasts - Station 92") +
+  geom_ribbon(aes(x=downsized_92$date[-1], ymin=f_92[-1]-1.96*sqrtQ_92[-1], ymax=f_92[-1]+1.96*sqrtQ_92[-1]), fill='lightyellow') +
+  geom_line(aes(x=downsized_92$date[-1], y=f_92[-1]), col='orange') + 
+  geom_line(aes(x=downsized_47$date[-1], y=downsized_92$l_pm25[-1])) +
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  ylim(1.8, 5.2) +
+  labs(x=NULL, y=NULL) +
+  theme(plot.title=element_text(size=20))
+```
+Figures 6-8 show the measured data for each station (\textit{in black}) and the one-step ahead forecast of the observations (\textit{in color}). Note that the light-colored regions represent the $95\%$ confidence intervals. In all three graphs the forecasts seem to be accurate, therefore, the model provides a good estimate of the data, in which case it would be a good solution for our research question. To confirm it and quantify the precision of our forecast, let us look at the errors. Note that we are also doing a comparison with a model with no spatial dependence but allowing the state-errors variances to differ as it seems to be the case in the graphs. In this case, the model is the same as before, except for:
+\begin{center}
+$$
+W=\begin{pmatrix}\sigma ^2_{w_1}&0&0\\0&\sigma^2_{w_2}&0\\0&0&\sigma^2_{w_3}\end{pmatrix}
+$$
+\end{center}
+```{r, echo=F, message= F, warning= F, out.width = '35%', fig.align='center'}
+errors = residuals(Filtered)
+
+qqnorm(errors$res, main="Fig. 9: Q-Q Plot (Normal Distribution)", main.size=15)
+qqline(errors$res)
+
+errors_mean<-mean(errors$res)
+errors_sd<-sd(errors$res)
+t_stat<-errors_mean/errors_sd
+
+DF = downsized_47$l_pm25
+MAPE<-100*MAPE(f_47, DF)
+MSFE<-100*MSE(f_47, DF)
+
+
+
+
+build <- function(par){
+  VV <- diag(3) * par[1]
+  WW <- c(par[2], par[3], par[4])*diag(3)
+  FF <- diag(3)
+  GG <- diag(3)
+  my_mod <- dlm(FF=FF,
+                GG=GG,
+                V = VV,
+                W = WW,
+                m0 = Y_pm[1,], 
+                C0 = diag(3) * 1e2)
+  return(my_mod)
+}
+MLE_not_spatial<-dlmMLE(Y_pm, parm=rep(0, 4), build, lower=c(0.00001, 0.00001, 0.00001, 0.00001))
+Model_not_spatial<-build_spatial(MLE_not_spatial$par)
+Filtered_not_spatial<-dlmFilter(Y_pm, Model_not_spatial)
+errors_not_spatial = residuals(Filtered_not_spatial)
+errors_mean_not_spatial<-mean(errors_not_spatial$res)
+errors_sd_not_spatial<-sd(errors_not_spatial$res)
+t_stat_not_spatial<-errors_mean_not_spatial/errors_sd_not_spatial
+f_47_not_spatial<-Filtered_not_spatial$f
+MAPE_not_spatial<-100*MAPE(f_47_not_spatial, DF)
+MSFE_not_spatial<-100*MSE(f_47_not_spatial, DF)
+
+
+test_errors<-matrix(c(errors_mean, errors_sd, t_stat, MAPE, MSFE, errors_mean_not_spatial, errors_sd_not_spatial, t_stat_not_spatial, MAPE_not_spatial, MSFE_not_spatial), nrow=2, byrow=T)
+colnames(test_errors)=c("Errors_Mean", "Errors_SD", "Errors_t-stat", "MAPE", "MSE")
+rownames(test_errors)=c("Spatial Model", "Not Spatial Model")
+```
+```{r, echo=F, message= F, warning= F, comment=' ', cache.comments=TRUE, results='asis'}
+test_errors.table<-xtable(test_errors, digits=3, caption="Errors")
+align(test_errors.table)<-"|l|r|r|r|r|r|"
+test_errors.table
+```
+As we can see from figure 12, we can conclude that the distribution of the forecast errors in the spatial model is approximately normal, and since $t-stat<1.96$, we can reject the fact that the errors are significantly different from zero for both models. Note that the mean absolute percentage error is of $5.696\%$ (\textit{and mean squared error of $8.168\%$}) for the model with spatial dependence and $7.378\%$ (\textit{and mean squared error of $15.106\%$}) for the model without, we can thus conclude that the spatial-dependence model is more accurate.
+
+\subsection*{ Analysis:}
+
+Using dynamic linear models, which are based on Bayesian statistics, it is possible to provide an online prediction for streaming data, as we have just did in the previous section. Indeed, these models allow us to have computational efficient online predictions through recursive formulae, therefore, it also allows us to quantify the uncertainty of the estimates. Since our data is very noisy, a good idea to reduce the noise is to downsize it. Moreover, the fact that it is linked to wildfires tends to favor a day/night grouping of the data since fires are more likely to occur during the day. This imply that the variance of our data set is significantly reduced and thus it is easier to estimate the model.
+\newline
+In the previous part, we have introduced a spatial dimension to our model. As we have seen from Table 7, this increases the accuracy of our estimations and predictions. Therefore, we have a promising hint for the estimation of an accurate model to predict the evolution of the level of $PM_{25}$. Indeed, this spatial dependence could be included in a model in which the precedent level of $PM_{25}$ impacts the future level of each station (\textit{the impact would decrease with the distance}). In that case, the model would be slightly different from the first one that we estimated, indeed, $G$ would not be the identity matrix anymore but would be of the form:
+
+\begin{center}
+$$
+G=\begin{pmatrix}1&\psi D(47,55)&\psi D(47,92)\\ \psi D(47, 55)&1&\psi D(55,92)\\\psi D(47,92)&\psi D(55,92)&1\end{pmatrix}
+$$
+\end{center}
+
+\subsection*{ Other Factors:}
+
+Until now we have only used the level of $PM_{25}$ to predict the level of $PM_{25}$. However, it is important to notice that this particle is linked to the presence of wildfires. Therefore, it should be impacted by the wind and the temperature that are aggravating factors. 
+\newline
+Thus, an idea would be to add some lags of these variables to predict in advance a potential increase in the level of $PM_{25}$ or to use a dynamic linear model with temperatures and wind as states. We can also combine them. This would mean to fit the trend (\textit{global warming}), the seasonality (\textit{seasonality}), and to use an ARIMA model for the detrended time series (\textit{temperature and wind}). Obviously, if needed, we would need to use some other tools to make the temperature and the wind stationary.  After these estimates are done, we can combine them with a dynamic linear model, such as the one computed before that includes the spatial dependence.
+\newline 
+
+However, to compute such a model, we would need data from several years in order to fit the trend and the seasonality. Also, this model may require to estimate to many parameters which can bring more complications than solutions for our research question. A first-step would be to compare the previous models with a simple model including the wind and temperatures to check whether it is comparable in terms of prediction power. 
+
+\subsection*{ Conclusion:}
+
+In this project the two main categories of model that we are using are Hidden Markov Models and Dynamic Linear Models. In general, no statistical model is perfect, therefore,it is necessary to compare the assumptions needed by the different models as well as the fit of each model to the data.
+\newline 
+The HMM relies on the conditions required in the definition stated in page 2 and additional assumptions of normality and  independence between the stations. 
+\newline 
+On the other hand, the DLM assumes that the initial distribution of the hidden state is independent from the distribution of the errors $(v_t)$ and $(w_t)$. We also assume that the relations are linear and that the distributions are Gaussians. Furthermore, we assume some additional conditions such as the fact that we have a random walk plus noise or that the states have the same variance, but we allow for spatial dependence  that are specified in the way we explained in page 5.
+\newline
+In our case, the DLM with spatial dependence provides a better fit. Moreover, the additional assumptions made in this model are reasonable therefore, out of the models that we have tried, it is the one that we would keep to forecast and make decisions.
+\newline
+Another way would be to investigate the relationship between the level of $PM_{25}$ and some other variables (\textit{wind, temperature}). 
+
+
+
